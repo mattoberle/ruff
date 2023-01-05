@@ -1,9 +1,8 @@
-use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use itertools::Either::{Left, Right};
-use itertools::Itertools;
+use itertools::{Either, Itertools};
 use ropey::RopeBuilder;
 use rustc_hash::FxHashMap;
 use rustpython_ast::{Stmt, StmtKind};
@@ -11,10 +10,10 @@ use rustpython_ast::{Stmt, StmtKind};
 use crate::isort::categorize::{categorize, ImportType};
 use crate::isort::comments::Comment;
 use crate::isort::helpers::trailing_comma;
-use crate::isort::sorting::{cmp_any_import, cmp_import_from, cmp_members, cmp_modules};
+use crate::isort::sorting::{cmp_any_import, cmp_members};
 use crate::isort::track::{Block, Trailer};
 use crate::isort::types::{
-    AliasData, AnyImport, CommentSet, ImportBlock, ImportFromData, Importable, OrderedImportBlock,
+    AliasData, CommentSet, Import, ImportBlock, ImportFrom, ImportFromData, Importable,
     TrailingComma,
 };
 use crate::source_code_style::SourceCodeStyleDetector;
@@ -382,153 +381,162 @@ fn categorize_imports<'a>(
     block_by_type
 }
 
-fn sort_imports(block: ImportBlock, order_by_type: bool) -> OrderedImportBlock {
-    let mut ordered = OrderedImportBlock::default();
-
-    // Sort `StmtKind::Import`.
-    ordered.import.extend(
-        block
-            .import
+fn import_from_to_import_from<'a>(
+    import_from_data: ImportFromData<'a>,
+    aliases: FxHashMap<AliasData<'a>, CommentSet<'a>>,
+    comments: CommentSet<'a>,
+    trailing_comma: TrailingComma,
+    order_by_type: bool,
+) -> ImportFrom<'a> {
+    (
+        import_from_data,
+        comments,
+        trailing_comma,
+        aliases
             .into_iter()
-            .sorted_by(|(alias1, _), (alias2, _)| cmp_modules(alias1, alias2)),
-    );
+            .sorted_by(|(alias1, _), (alias2, _)| cmp_members(alias1, alias2, order_by_type))
+            .collect::<Vec<(AliasData, CommentSet)>>(),
+    )
+}
 
-    // Sort `StmtKind::ImportFrom`.
-    ordered.import_from.extend(
-        // Include all non-re-exports.
-        block
-            .import_from
-            .into_iter()
-            .chain(
-                // Include all re-exports.
-                block
-                    .import_from_as
-                    .into_iter()
-                    .map(|((import_from, alias), comments)| {
-                        (
-                            import_from,
-                            (
-                                CommentSet {
-                                    atop: comments.atop,
-                                    inline: vec![],
-                                },
-                                FxHashMap::from_iter([(
-                                    alias,
-                                    CommentSet {
-                                        atop: vec![],
-                                        inline: comments.inline,
-                                    },
-                                )]),
-                                TrailingComma::Absent,
-                            ),
-                        )
-                    }),
-            )
-            .chain(
-                // Include all star imports.
-                block
-                    .import_from_star
-                    .into_iter()
-                    .map(|(import_from, comments)| {
-                        (
-                            import_from,
-                            (
-                                CommentSet {
-                                    atop: comments.atop,
-                                    inline: vec![],
-                                },
-                                FxHashMap::from_iter([(
-                                    AliasData {
-                                        name: "*",
-                                        asname: None,
-                                    },
-                                    CommentSet {
-                                        atop: vec![],
-                                        inline: comments.inline,
-                                    },
-                                )]),
-                                TrailingComma::Absent,
-                            ),
-                        )
-                    }),
-            )
-            .map(|(import_from, (comments, aliases, locations))| {
-                // Within each `StmtKind::ImportFrom`, sort the members.
-                (
-                    import_from,
-                    comments,
-                    locations,
-                    aliases
-                        .into_iter()
-                        .sorted_by(|(alias1, _), (alias2, _)| {
-                            cmp_members(alias1, alias2, order_by_type)
-                        })
-                        .collect::<Vec<(AliasData, CommentSet)>>(),
-                )
-            })
-            .sorted_by(
-                |(import_from1, _, _, aliases1), (import_from2, _, _, aliases2)| {
-                    cmp_import_from(import_from1, import_from2).then_with(|| {
-                        match (aliases1.first(), aliases2.first()) {
-                            (None, None) => Ordering::Equal,
-                            (None, Some(_)) => Ordering::Less,
-                            (Some(_), None) => Ordering::Greater,
-                            (Some((alias1, _)), Some((alias2, _))) => {
-                                cmp_members(alias1, alias2, order_by_type)
-                            }
-                        }
-                    })
-                },
-            ),
-    );
-    ordered
+fn import_as_to_import_from<'a>(
+    import_from_data: ImportFromData<'a>,
+    alias_data: AliasData<'a>,
+    comments: CommentSet<'a>,
+    order_by_type: bool,
+) -> ImportFrom<'a> {
+    (
+        import_from_data,
+        CommentSet {
+            atop: comments.atop,
+            inline: vec![],
+        },
+        TrailingComma::Absent,
+        FxHashMap::from_iter([(
+            alias_data,
+            CommentSet {
+                atop: vec![],
+                inline: comments.inline,
+            },
+        )])
+        .into_iter()
+        .sorted_by(|(alias1, _), (alias2, _)| cmp_members(alias1, alias2, order_by_type))
+        .collect::<Vec<(AliasData, CommentSet)>>(),
+    )
+}
+
+fn import_from_star_to_import_from<'a>(
+    import_from_data: ImportFromData<'a>,
+    comments: CommentSet<'a>,
+) -> ImportFrom<'a> {
+    (
+        import_from_data,
+        CommentSet {
+            atop: comments.atop,
+            inline: vec![],
+        },
+        TrailingComma::Absent,
+        FxHashMap::from_iter([(
+            AliasData {
+                name: "*",
+                asname: None,
+            },
+            CommentSet {
+                atop: vec![],
+                inline: comments.inline,
+            },
+        )])
+        .into_iter()
+        .collect::<Vec<(AliasData, CommentSet)>>(),
+    )
 }
 
 fn force_single_line_imports<'a>(
-    block: OrderedImportBlock<'a>,
+    import_from: ImportFrom<'a>,
     single_line_exclusions: &BTreeSet<String>,
-) -> OrderedImportBlock<'a> {
-    OrderedImportBlock {
-        import: block.import,
-        import_from: block
-            .import_from
+) -> Vec<Either<Import<'a>, ImportFrom<'a>>> {
+    let (import_from_data, comment_set, trailing_comma, alias_data) = import_from;
+    if import_from_data
+        .module
+        .map_or(false, |module| single_line_exclusions.contains(module))
+    {
+        [(import_from_data, comment_set, trailing_comma, alias_data)]
             .into_iter()
-            .flat_map(|(from_data, comment_set, trailing_comma, alias_data)| {
-                if from_data
-                    .module
-                    .map_or(false, |module| single_line_exclusions.contains(module))
-                {
-                    Left(std::iter::once((
-                        from_data,
-                        comment_set,
-                        trailing_comma,
-                        alias_data,
-                    )))
-                } else {
-                    Right(
-                        alias_data
-                            .into_iter()
-                            .enumerate()
-                            .map(move |(index, alias_data)| {
-                                (
-                                    from_data.clone(),
-                                    if index == 0 {
-                                        comment_set.clone()
-                                    } else {
-                                        CommentSet {
-                                            atop: vec![],
-                                            inline: vec![],
-                                        }
-                                    },
-                                    TrailingComma::Absent,
-                                    vec![alias_data],
-                                )
-                            }),
-                    )
-                }
+            .map(Right)
+            .collect()
+    } else {
+        alias_data
+            .into_iter()
+            .enumerate()
+            .map(move |(index, alias_data)| {
+                (
+                    import_from_data.clone(),
+                    if index == 0 {
+                        comment_set.clone()
+                    } else {
+                        CommentSet {
+                            atop: vec![],
+                            inline: vec![],
+                        }
+                    },
+                    TrailingComma::Absent,
+                    vec![alias_data],
+                )
             })
-            .collect(),
+            .map(Right)
+            .collect()
     }
+}
+
+fn sort_imports<'a>(
+    block: ImportBlock<'a>,
+    force_single_line: bool,
+    force_sort_within_sections: bool,
+    order_by_type: bool,
+    single_line_exclusions: &BTreeSet<String>,
+) -> Vec<Either<Import<'a>, ImportFrom<'a>>> {
+    let import = block.import.into_iter().map(Left);
+
+    let import_from = block
+        .import_from
+        .into_iter()
+        // from x import y
+        .map(|(import_from_data, (comments, aliases, trailing_comma))| {
+            import_from_to_import_from(
+                import_from_data,
+                aliases,
+                comments,
+                trailing_comma,
+                order_by_type,
+            )
+        })
+        // from x import y as z
+        .chain(block.import_from_as.into_iter().map(
+            |((import_from_data, alias_data), comments)| {
+                import_as_to_import_from(import_from_data, alias_data, comments, order_by_type)
+            },
+        ))
+        // from x import *
+        .chain(
+            block
+                .import_from_star
+                .into_iter()
+                .map(|(import_from_data, comments)| {
+                    import_from_star_to_import_from(import_from_data, comments)
+                }),
+        )
+        .map(Right);
+
+    import
+        .chain(import_from.flat_map(
+            |x: Either<Import, ImportFrom>| match (x, force_single_line) {
+                (Right(imp), true) => force_single_line_imports(imp, single_line_exclusions),
+                (Right(imp), false) => Vec::from([Right(imp)]),
+                (..) => Vec::new(),
+            },
+        ))
+        .sorted_by(|a, b| cmp_any_import(a, b, force_sort_within_sections, order_by_type))
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
@@ -572,11 +580,6 @@ pub fn format_imports(
     // Generate replacement source code.
     let mut is_first_block = true;
     for import_block in block_by_type.into_values() {
-        let mut import_block = sort_imports(import_block, order_by_type);
-        if force_single_line {
-            import_block = force_single_line_imports(import_block, single_line_exclusions);
-        }
-
         // Add a blank line between every section.
         if is_first_block {
             is_first_block = false;
@@ -586,28 +589,16 @@ pub fn format_imports(
 
         let mut is_first_statement = true;
 
-        let it = import_block
-            .import
-            .into_iter()
-            .map(AnyImport::Import)
-            .chain(
-                import_block
-                    .import_from
-                    .into_iter()
-                    .map(AnyImport::ImportFrom),
-            )
-            .sorted_by(|a, b| {
-                if force_sort_within_sections {
-                    cmp_any_import(a, b)
-                } else {
-                    Ordering::Greater
-                }
-            });
-
-        for import in it {
-            match import {
-                AnyImport::Import(x) => {
-                    let (alias, comments) = &x;
+        for x in sort_imports(
+            import_block,
+            force_single_line,
+            force_sort_within_sections,
+            order_by_type,
+            single_line_exclusions,
+        ) {
+            match x {
+                Left(import) => {
+                    let (alias, comments) = &import;
                     output.append(&format::format_import(
                         alias,
                         comments,
@@ -615,8 +606,8 @@ pub fn format_imports(
                         stylist,
                     ));
                 }
-                AnyImport::ImportFrom(x) => {
-                    let (import_from, comments, trailing_comma, aliases) = &x;
+                Right(import_from) => {
+                    let (import_from, comments, trailing_comma, aliases) = &import_from;
                     output.append(&format::format_import_from(
                         import_from,
                         comments,

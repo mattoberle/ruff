@@ -1,7 +1,10 @@
 /// See: <https://github.com/PyCQA/isort/blob/12cc5fbd67eebf92eb2213b03c07b138ae1fb448/isort/sorting.py#L13>
 use std::cmp::Ordering;
 
-use crate::isort::types::{AliasData, AnyImport, ImportFromData};
+use itertools::Either;
+use itertools::Either::{Left, Right};
+
+use crate::isort::types::{AliasData, Import, ImportFrom, ImportFromData};
 use crate::python::string;
 
 #[derive(PartialOrd, Ord, PartialEq, Eq)]
@@ -21,6 +24,15 @@ fn prefix(name: &str) -> Prefix {
     } else {
         // Ex) `variable`
         Prefix::Variables
+    }
+}
+
+fn cmp_option_str_ignore_case(a: Option<&String>, b: Option<&String>) -> Ordering {
+    match (a, b) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Less,
+        (Some(_), None) => Ordering::Greater,
+        (Some(a1), Some(b1)) => natord::compare_ignore_case(a1, b1),
     }
 }
 
@@ -70,16 +82,36 @@ pub fn cmp_import_from(import_from1: &ImportFromData, import_from2: &ImportFromD
     })
 }
 
-/// Compare two `AnyImport` enums which may be `Import` or `ImportFrom` structs.
-pub fn cmp_any_import(a: &AnyImport, b: &AnyImport) -> Ordering {
-    match (&a, &b) {
-        (AnyImport::Import(x), AnyImport::Import(y)) => cmp_modules(&x.0, &y.0),
-        (AnyImport::ImportFrom(x), AnyImport::Import(y)) => {
-            natord::compare_ignore_case(x.0.module.unwrap(), y.0.name)
+pub fn cmp_any_import(
+    a: &Either<Import, ImportFrom>,
+    b: &Either<Import, ImportFrom>,
+    force_sort_within_sections: bool,
+    order_by_type: bool,
+) -> Ordering {
+    match (a, b, force_sort_within_sections) {
+        // Comparisons of the same type (eg. Import to Import)
+        (Left(import1), Left(import2), _) => cmp_modules(&import1.0, &import2.0),
+        (Right(import_from1), Right(import_from2), _) => {
+            cmp_import_from(&import_from1.0, &import_from2.0).then_with(|| {
+                match (import_from1.3.first(), import_from2.3.first()) {
+                    (None, None) => Ordering::Equal,
+                    (None, Some(_)) => Ordering::Less,
+                    (Some(_), None) => Ordering::Greater,
+                    (Some((alias1, _)), Some((alias2, _))) => {
+                        cmp_members(alias1, alias2, order_by_type)
+                    }
+                }
+            })
         }
-        (AnyImport::Import(x), AnyImport::ImportFrom(y)) => {
-            natord::compare_ignore_case(x.0.name, y.0.module.unwrap())
+
+        // Comparisons of different types (eg. Import to ImportFrom)
+        (Left(_import), Right(_import_from), false) => Ordering::Less,
+        (Right(_import_from), Left(_import), false) => Ordering::Greater,
+        (Left(import), Right(import_from), true) => {
+            cmp_option_str_ignore_case(Some(&import.0.name.to_string()), import_from.0.module)
         }
-        (AnyImport::ImportFrom(x), AnyImport::ImportFrom(y)) => cmp_import_from(&x.0, &y.0),
+        (Right(import_from), Left(import), true) => {
+            cmp_option_str_ignore_case(import_from.0.module, Some(&import.0.name.to_string()))
+        }
     }
 }

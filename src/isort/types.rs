@@ -92,14 +92,3 @@ pub type ImportFrom<'a> = (
     TrailingComma,
     Vec<AliasDataWithComments<'a>>,
 );
-
-pub enum AnyImport<'a> {
-    Import(Import<'a>),
-    ImportFrom(ImportFrom<'a>),
-}
-
-#[derive(Debug, Default)]
-pub struct OrderedImportBlock<'a> {
-    pub import: Vec<Import<'a>>,
-    pub import_from: Vec<ImportFrom<'a>>,
-}
